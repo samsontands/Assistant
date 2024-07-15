@@ -240,5 +240,10 @@ if st.checkbox("Show debug info"):
 
 # Add debug log display
 if st.checkbox("Show debug logs"):
-    with open("streamlit.log", "r") as log_file:
-        st.text(log_file.read())
+    try:
+        with open("streamlit.log", "r") as log_file:
+            st.text(log_file.read())
+    except FileNotFoundError:
+        st.warning("Log file not found. This may be due to running on Streamlit Cloud, which doesn't allow direct file access.")
+    except Exception as e:
+        st.error(f"An error occurred while trying to read the log file: {str(e)}")
