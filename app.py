@@ -137,46 +137,83 @@ def get_events(service, start_date, end_date):
         logger.error(f"Error in get_events: {str(e)}")
         return []
 
+def get_events_for_date(service, date):
+    try:
+        start_datetime = malaysia_tz.localize(datetime.combine(date, datetime.min.time()))
+        end_datetime = malaysia_tz.localize(datetime.combine(date, datetime.max.time()))
+        
+        events_result = service.events().list(calendarId='primary', 
+                                              timeMin=start_datetime.isoformat(),
+                                              timeMax=end_datetime.isoformat(), 
+                                              singleEvents=True,
+                                              orderBy='startTime').execute()
+        events = events_result.get('items', [])
+        return events
+    except Exception as e:
+        logger.error(f"Error in get_events_for_date: {str(e)}")
+        return []
+
+def format_events(events):
+    if not events:
+        return "You have no events scheduled."
+    
+    event_list = []
+    for event in events:
+        start = event['start'].get('dateTime', event['start'].get('date'))
+        if isinstance(start, str):
+            start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
+            event_list.append(f"- {event['summary']} at {start_time.strftime('%I:%M %p')}")
+        else:
+            event_list.append(f"- {event['summary']} (all-day event)")
+    return "Here are your events:\n" + "\n".join(event_list)
+
 def process_query(service, query):
     try:
+        context = st.session_state.get('context', {})
+        
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful calendar assistant. Determine if the user wants to create an event, retrieve events, or do something else. Respond with 'create', 'retrieve', or 'other'."},
-                {"role": "user", "content": query}
+                {"role": "system", "content": "You are a helpful calendar assistant. Determine if the user wants to create an event, retrieve events, or do something else. If it's a follow-up question, use the context to understand which date they're referring to. Respond with a JSON object containing 'intent' (create, retrieve, or other) and 'date' (today, tomorrow, or a specific date)."},
+                {"role": "user", "content": f"Previous context: {context}\nCurrent query: {query}"}
             ]
         )
-        intent = response.choices[0].message.content.lower()
-        logger.info(f"Detected intent: {intent}")
+        result = json.loads(response.choices[0].message.content)
+        logger.info(f"Detected intent: {result}")
 
-        if "create" in intent:
+        intent = result.get('intent', '').lower()
+        date_str = result.get('date', '').lower()
+
+        now = get_current_time()
+        if date_str == 'today':
+            target_date = now.date()
+        elif date_str == 'tomorrow':
+            target_date = (now + timedelta(days=1)).date()
+        else:
+            try:
+                target_date = parser.parse(date_str).date()
+            except:
+                target_date = now.date()
+
+        st.session_state['context'] = {'last_date': target_date.isoformat()}
+
+        if intent == 'create':
             event_details = parse_event_details(query)
-            logger.info(f"Parsed event details: {event_details}")
             if event_details:
                 return create_event(service, event_details)
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-        elif "retrieve" in intent:
-            today = get_current_time().date()
-            tomorrow = today + timedelta(days=1)
-            events = get_events(service, today, tomorrow)
-            if events:
-                event_list = []
-                for event in events:
-                    start = event['start'].get('dateTime', event['start'].get('date'))
-                    if isinstance(start, str):
-                        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-                        event_list.append(f"- {event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}")
-                    else:
-                        event_list.append(f"- {event['summary']} (all-day event on {start})")
-                return "Here are your events:\n" + "\n".join(event_list)
-            else:
-                return "You have no events scheduled."
+        elif intent == 'retrieve':
+            events = get_events_for_date(service, target_date)
+            return f"Events for {target_date.strftime('%Y-%m-%d')}:\n" + format_events(events)
         else:
             return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
+
+if 'context' not in st.session_state:
+    st.session_state['context'] = {}
 
 # Streamlit app
 st.title("Malaysia Timezone Calendar Assistant")
