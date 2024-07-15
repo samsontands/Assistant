@@ -13,24 +13,22 @@ CLIENT_CONFIG = {
         "client_secret": st.secrets["GOOGLE_CLIENT_SECRET"],
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": [st.secrets["REDIRECT_URI"]],  # Use the deployed Streamlit app URL
+        "redirect_uris": ["http://localhost:8501/"],  # Update this with your Streamlit app URL when deploying
     }
 }
 
 def get_calendar_service():
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
-    flow.redirect_uri = CLIENT_CONFIG['web']['redirect_uris'][0]
-
+    
     if 'token' not in st.session_state:
-        if 'code' not in st.experimental_get_query_params():
-            authorization_url, _ = flow.authorization_url(prompt='consent')
-            st.markdown(f'Please [click here]({authorization_url}) to authorize this app.')
-            return None
-        else:
-            code = st.experimental_get_query_params()['code'][0]
+        authorization_url, _ = flow.authorization_url(prompt='consent')
+        st.markdown(f'Please [click here]({authorization_url}) to authorize this app.')
+        code = st.text_input('Enter the authorization code:')
+        if code:
             flow.fetch_token(code=code)
             creds = flow.credentials
             st.session_state['token'] = creds.to_json()
+            st.experimental_rerun()
     else:
         creds = Credentials.from_authorized_user_info(json.loads(st.session_state['token']), SCOPES)
         
@@ -42,9 +40,9 @@ def get_calendar_service():
 
 st.title("Create Google Calendar Event")
 
-service = get_calendar_service()
-
-if service:
+if 'token' not in st.session_state:
+    st.warning('Please authenticate with Google Calendar first.')
+else:
     # Collect event details
     event_title = st.text_input("Event Title")
     event_date = st.date_input("Event Date")
@@ -54,6 +52,8 @@ if service:
 
     if st.button("Create Event"):
         try:
+            service = get_calendar_service()
+            
             event = {
                 'summary': event_title,
                 'description': description,
@@ -71,7 +71,5 @@ if service:
             st.success(f"Event created: {event.get('htmlLink')}")
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
-else:
-    st.warning('Please authenticate with Google Calendar using the link above.')
 
 st.write("Note: You may need to authenticate with Google on first use.")
