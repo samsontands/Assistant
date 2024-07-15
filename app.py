@@ -167,47 +167,74 @@ def format_events(events):
             event_list.append(f"- {event['summary']} (all-day event)")
     return "Here are your events:\n" + "\n".join(event_list)
 
-def process_query(service, query):
+def dispatch_query(query, context):
     try:
-        context = st.session_state.get('context', {})
-        
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful calendar assistant. Determine if the user wants to create an event, retrieve events, or do something else. If it's a follow-up question, use the context to understand which date they're referring to. Respond with a JSON object containing 'intent' (create, retrieve, or other) and 'date' (today, tomorrow, or a specific date)."},
+                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'agent' (create_event, retrieve_events, or general_query) and any relevant parameters."},
                 {"role": "user", "content": f"Previous context: {context}\nCurrent query: {query}"}
             ]
         )
         result = json.loads(response.choices[0].message.content)
-        logger.info(f"Detected intent: {result}")
+        logger.info(f"Dispatch result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in dispatch_query: {str(e)}")
+        return {"agent": "general_query"}
 
-        intent = result.get('intent', '').lower()
-        date_str = result.get('date', '').lower()
+def create_event_agent(service, query):
+    event_details = parse_event_details(query)
+    if event_details:
+        return create_event(service, event_details)
+    else:
+        return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
 
-        now = get_current_time()
-        if date_str == 'today':
+def retrieve_events_agent(service, date_str):
+    now = get_current_time()
+    if date_str == 'today':
+        target_date = now.date()
+    elif date_str == 'tomorrow':
+        target_date = (now + timedelta(days=1)).date()
+    else:
+        try:
+            target_date = parser.parse(date_str).date()
+        except:
             target_date = now.date()
-        elif date_str == 'tomorrow':
-            target_date = (now + timedelta(days=1)).date()
-        else:
-            try:
-                target_date = parser.parse(date_str).date()
-            except:
-                target_date = now.date()
 
-        st.session_state['context'] = {'last_date': target_date.isoformat()}
+    events = get_events_for_date(service, target_date)
+    return f"Events for {target_date.strftime('%Y-%m-%d')}:\n" + format_events(events)
 
-        if intent == 'create':
-            event_details = parse_event_details(query)
-            if event_details:
-                return create_event(service, event_details)
-            else:
-                return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-        elif intent == 'retrieve':
-            events = get_events_for_date(service, target_date)
-            return f"Events for {target_date.strftime('%Y-%m-%d')}:\n" + format_events(events)
+def general_query_agent(query):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant. Provide a friendly and informative response to the user's query."},
+                {"role": "user", "content": query}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error in general_query_agent: {str(e)}")
+        return "I'm sorry, I encountered an error while processing your request."
+
+def process_query(service, query):
+    try:
+        context = st.session_state.get('context', {})
+        dispatch_result = dispatch_query(query, context)
+
+        agent = dispatch_result.get('agent', 'general_query')
+        if agent == 'create_event':
+            response = create_event_agent(service, query)
+        elif agent == 'retrieve_events':
+            date_str = dispatch_result.get('date', 'today')
+            response = retrieve_events_agent(service, date_str)
         else:
-            return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
+            response = general_query_agent(query)
+
+        st.session_state['context'] = {'last_query': query, 'last_response': response}
+        return response
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
