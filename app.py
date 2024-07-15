@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 import openai
 import logging
+import pytz
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,9 @@ CLIENT_CONFIG = {
 # Setup OpenAI
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
+# Setup timezone
+MY_TZ = pytz.timezone('Asia/Kuala_Lumpur')
+
 def create_flow():
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     return flow
@@ -48,7 +52,7 @@ def parse_event_details(text):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults."},
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8)."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
@@ -56,14 +60,15 @@ def parse_event_details(text):
         event_details = json.loads(response.choices[0].message.content)
         
         # Set defaults if missing
+        now = datetime.now(MY_TZ)
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
         if 'date' not in event_details:
-            event_details['date'] = datetime.now().strftime("%Y-%m-%d")
+            event_details['date'] = now.strftime("%Y-%m-%d")
         if 'start_time' not in event_details:
-            event_details['start_time'] = datetime.now().strftime("%H:%M")
+            event_details['start_time'] = now.strftime("%H:%M")
         if 'end_time' not in event_details:
-            event_details['end_time'] = (datetime.now() + timedelta(hours=1)).strftime("%H:%M")
+            event_details['end_time'] = (now + timedelta(hours=1)).strftime("%H:%M")
         if 'description' not in event_details:
             event_details['description'] = ""
         
@@ -74,16 +79,19 @@ def parse_event_details(text):
 
 def create_event(service, event_details):
     try:
+        start_datetime = MY_TZ.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
+        end_datetime = MY_TZ.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
+        
         event = {
             'summary': event_details['title'],
             'description': event_details.get('description', ''),
             'start': {
-                'dateTime': f"{event_details['date']}T{event_details['start_time']}:00",
-                'timeZone': 'UTC',
+                'dateTime': start_datetime.isoformat(),
+                'timeZone': 'Asia/Kuala_Lumpur',
             },
             'end': {
-                'dateTime': f"{event_details['date']}T{event_details['end_time']}:00",
-                'timeZone': 'UTC',
+                'dateTime': end_datetime.isoformat(),
+                'timeZone': 'Asia/Kuala_Lumpur',
             },
         }
         logger.info(f"Creating event: {event}")
@@ -99,8 +107,13 @@ def create_event(service, event_details):
 
 def get_events(service, start_date, end_date):
     try:
-        events_result = service.events().list(calendarId='primary', timeMin=start_date.isoformat() + 'Z',
-                                              timeMax=end_date.isoformat() + 'Z', singleEvents=True,
+        start_datetime = MY_TZ.localize(datetime.combine(start_date, datetime.min.time()))
+        end_datetime = MY_TZ.localize(datetime.combine(end_date, datetime.max.time()))
+        
+        events_result = service.events().list(calendarId='primary', 
+                                              timeMin=start_datetime.isoformat(),
+                                              timeMax=end_datetime.isoformat(), 
+                                              singleEvents=True,
                                               orderBy='startTime').execute()
         events = events_result.get('items', [])
         return events
@@ -127,11 +140,19 @@ def process_query(service, query):
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
         elif "retrieve" in intent:
-            today = datetime.now().date()
+            today = datetime.now(MY_TZ).date()
             tomorrow = today + timedelta(days=1)
             events = get_events(service, today, tomorrow)
             if events:
-                return "Here are your events for today:\n" + "\n".join([f"- {event['summary']} at {event['start'].get('dateTime', event['start'].get('date'))}" for event in events])
+                event_list = []
+                for event in events:
+                    start = event['start'].get('dateTime', event['start'].get('date'))
+                    if isinstance(start, str):
+                        start_time = datetime.fromisoformat(start).astimezone(MY_TZ)
+                        event_list.append(f"- {event['summary']} at {start_time.strftime('%I:%M %p')}")
+                    else:
+                        event_list.append(f"- {event['summary']} (all-day event)")
+                return "Here are your events for today:\n" + "\n".join(event_list)
             else:
                 return "You have no events scheduled for today."
         else:
@@ -141,7 +162,7 @@ def process_query(service, query):
         return f"An error occurred while processing your request: {str(e)}"
 
 # Streamlit app
-st.title("OpenAI-Powered Calendar Assistant")
+st.title("Malaysia Timezone Calendar Assistant")
 
 # Authentication flow
 if 'credentials' not in st.session_state:
