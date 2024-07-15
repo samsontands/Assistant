@@ -3,7 +3,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from googleapiclient.errors import HttpError
 import json
+from datetime import datetime, timezone
 
 # Setup for Google Calendar API
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
@@ -41,24 +43,30 @@ def get_calendar_service():
 
 st.title("Create Google Calendar Event")
 
-# Check if the user is authenticated
+# Authentication flow (unchanged)
 if 'credentials' not in st.session_state:
     flow = create_flow()
     authorization_url, _ = flow.authorization_url(prompt='consent')
     
-    st.write("Please log in to your Google account to continue.")
+    st.write("This app is currently in testing mode. Only approved test users can access it.")
+    st.write("If you're an approved tester, please log in to your Google account to continue.")
     if st.button("Log in to Google"):
         st.markdown(f'Click [here]({authorization_url}) to authorize this app.')
         
-    # Check if the authorization code is in the URL
     params = st.experimental_get_query_params()
     if 'code' in params:
-        code = params['code'][0]
-        flow = create_flow()
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
-        st.session_state.credentials = json.loads(credentials.to_json())
-        st.experimental_rerun()
+        try:
+            code = params['code'][0]
+            flow = create_flow()
+            flow.fetch_token(code=code)
+            credentials = flow.credentials
+            st.session_state.credentials = json.loads(credentials.to_json())
+            st.experimental_rerun()
+        except Exception as e:
+            if 'access_denied' in str(e):
+                st.error("Access denied. You may not be an approved tester for this app.")
+            else:
+                st.error(f"An error occurred during authentication: {str(e)}")
 
 else:
     service = get_calendar_service()
@@ -72,23 +80,34 @@ else:
 
         if st.button("Create Event"):
             try:
+                # Combine date and time, and format correctly
+                start_datetime = datetime.combine(event_date, start_time).replace(tzinfo=timezone.utc)
+                end_datetime = datetime.combine(event_date, end_time).replace(tzinfo=timezone.utc)
+                
                 event = {
                     'summary': event_title,
                     'description': description,
                     'start': {
-                        'dateTime': f"{event_date}T{start_time}:00",
-                        'timeZone': 'UTC',  # Replace with your timezone
+                        'dateTime': start_datetime.isoformat(),
+                        'timeZone': 'UTC',
                     },
                     'end': {
-                        'dateTime': f"{event_date}T{end_time}:00",
-                        'timeZone': 'UTC',  # Replace with your timezone
+                        'dateTime': end_datetime.isoformat(),
+                        'timeZone': 'UTC',
                     },
                 }
 
+                st.write("Sending the following event data to Google Calendar API:")
+                st.json(event)  # Display the event data for debugging
+
                 event = service.events().insert(calendarId='primary', body=event).execute()
                 st.success(f"Event created: {event.get('htmlLink')}")
+            except HttpError as e:
+                error_details = json.loads(e.content.decode())
+                st.error(f"An HTTP error occurred: {e.resp.status} {e.resp.reason}")
+                st.error(f"Error details: {error_details}")
             except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
+                st.error(f"An unexpected error occurred: {str(e)}")
 
         if st.button("Log out"):
             del st.session_state.credentials
@@ -98,4 +117,4 @@ else:
         del st.session_state.credentials
         st.experimental_rerun()
 
-st.write("Note: You may need to authenticate with Google on first use.")
+st.write("Note: This app is in testing mode. If you're having trouble accessing it, please contact the developer.")
