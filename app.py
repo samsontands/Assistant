@@ -57,7 +57,7 @@ def parse_event_details(text):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8)."},
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date_time (YYYY-MM-DD HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8)."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
@@ -68,18 +68,17 @@ def parse_event_details(text):
         now = get_current_time()
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
-        if 'date' not in event_details or not event_details['date']:
-            event_details['date'] = now.strftime("%Y-%m-%d")
-        if 'start_time' not in event_details or not event_details['start_time']:
-            event_details['start_time'] = now.strftime("%H:%M")
-        if 'end_time' not in event_details or not event_details['end_time']:
-            event_details['end_time'] = (now + timedelta(hours=1)).strftime("%H:%M")
+        if 'date_time' not in event_details or not event_details['date_time']:
+            event_details['date_time'] = now.strftime("%Y-%m-%d %H:%M")
+        if 'duration_minutes' not in event_details or not event_details['duration_minutes']:
+            event_details['duration_minutes'] = 60
         if 'description' not in event_details:
             event_details['description'] = ""
         
-        # Parse the date
-        parsed_date = parser.parse(event_details['date'], dayfirst=False, yearfirst=True)
-        event_details['date'] = parsed_date.strftime("%Y-%m-%d")
+        # Parse the date_time
+        event_datetime = malaysia_tz.localize(datetime.strptime(event_details['date_time'], "%Y-%m-%d %H:%M"))
+        event_details['start_datetime'] = event_datetime
+        event_details['end_datetime'] = event_datetime + timedelta(minutes=int(event_details['duration_minutes']))
         
         logger.info(f"Parsed event details: {event_details}")
         return event_details
@@ -89,18 +88,15 @@ def parse_event_details(text):
 
 def create_event(service, event_details):
     try:
-        start_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
-        end_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
-        
         event = {
             'summary': event_details['title'],
             'description': event_details.get('description', ''),
             'start': {
-                'dateTime': start_datetime.isoformat(),
+                'dateTime': event_details['start_datetime'].isoformat(),
                 'timeZone': 'Asia/Kuala_Lumpur',
             },
             'end': {
-                'dateTime': end_datetime.isoformat(),
+                'dateTime': event_details['end_datetime'].isoformat(),
                 'timeZone': 'Asia/Kuala_Lumpur',
             },
         }
@@ -114,7 +110,6 @@ def create_event(service, event_details):
     except Exception as e:
         logger.error(f"Error in create_event: {str(e)}")
         return f"An unexpected error occurred: {str(e)}"
-
 
 def get_events(service, start_date, end_date):
     try:
