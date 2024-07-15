@@ -35,6 +35,9 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 # Setup timezone
 MY_TZ = pytz.timezone('Asia/Kuala_Lumpur')
 
+def get_current_time():
+    return datetime.now(MY_TZ)
+
 def create_flow():
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     return flow
@@ -61,7 +64,7 @@ def parse_event_details(text):
         event_details = json.loads(response.choices[0].message.content)
         
         # Set defaults if missing
-        now = datetime.now(MY_TZ)
+        now = get_current_time()
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
         if 'date' not in event_details:
@@ -145,7 +148,7 @@ def process_query(service, query):
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
         elif "retrieve" in intent:
-            today = datetime.now(MY_TZ).date()
+            today = get_current_time().date()
             tomorrow = today + timedelta(days=1)
             events = get_events(service, today, tomorrow)
             if events:
@@ -166,11 +169,11 @@ def process_query(service, query):
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-# Streamlit app code remains the same
-# ...
-
 # Streamlit app
 st.title("Malaysia Timezone Calendar Assistant")
+
+# Display current time
+st.write(f"Current time in Malaysia: {get_current_time().strftime('%Y-%m-%d %I:%M %p')}")
 
 # Authentication flow
 if 'credentials' not in st.session_state:
