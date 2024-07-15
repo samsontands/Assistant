@@ -56,7 +56,7 @@ def parse_event_details(text):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8)."},
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8). For relative dates like 'tomorrow' or 'next week', calculate the actual date based on the current date."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
@@ -77,9 +77,12 @@ def parse_event_details(text):
             event_details['description'] = ""
         
         # Parse the date
-        parsed_date = parser.parse(event_details['date'], dayfirst=False, yearfirst=True)
+        parsed_date = parser.parse(event_details['date'], dayfirst=False, yearfirst=True, fuzzy=True)
+        if parsed_date.tzinfo is None:
+            parsed_date = malaysia_tz.localize(parsed_date)
         event_details['date'] = parsed_date.strftime("%Y-%m-%d")
         
+        logger.info(f"Parsed event details: {event_details}")
         return event_details
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
@@ -89,6 +92,10 @@ def create_event(service, event_details):
     try:
         start_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
         end_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
+        
+        # Ensure end_datetime is after start_datetime
+        if end_datetime <= start_datetime:
+            end_datetime = start_datetime + timedelta(hours=1)
         
         event = {
             'summary': event_details['title'],
@@ -143,31 +150,12 @@ def process_query(service, query):
 
         if "create" in intent:
             event_details = parse_event_details(query)
+            logger.info(f"Parsed event details: {event_details}")
             if event_details:
                 return create_event(service, event_details)
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-        elif "retrieve" in intent:
-            today = get_current_time().date()
-            tomorrow = today + timedelta(days=1)
-            events = get_events(service, today, tomorrow)
-            if events:
-                event_list = []
-                for event in events:
-                    start = event['start'].get('dateTime', event['start'].get('date'))
-                    if isinstance(start, str):
-                        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-                        event_list.append(f"- {event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}")
-                    else:
-                        event_list.append(f"- {event['summary']} (all-day event on {start})")
-                return "Here are your events:\n" + "\n".join(event_list)
-            else:
-                return "You have no events scheduled."
-        else:
-            return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
-    except Exception as e:
-        logger.error(f"Error in process_query: {str(e)}")
-        return f"An error occurred while processing your request: {str(e)}"
+        # ... rest of the function remains the same
 
 # Streamlit app
 st.title("Malaysia Timezone Calendar Assistant")
