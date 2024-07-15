@@ -12,7 +12,8 @@ import pytz
 from dateutil import parser
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(filename='streamlit.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Setup for Google Calendar API
@@ -63,8 +64,12 @@ def parse_event_details(text):
         logger.info(f"OpenAI Response: {response.choices[0].message.content}")
         event_details = json.loads(response.choices[0].message.content)
         
+        logger.info(f"Raw event details from OpenAI: {event_details}")
+        
         # Set defaults if missing
         now = get_current_time()
+        logger.info(f"Current time in Malaysia: {now}")
+        
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
         if 'date' not in event_details:
@@ -82,7 +87,7 @@ def parse_event_details(text):
             parsed_date = malaysia_tz.localize(parsed_date)
         event_details['date'] = parsed_date.strftime("%Y-%m-%d")
         
-        logger.info(f"Parsed event details: {event_details}")
+        logger.info(f"Final parsed event details: {event_details}")
         return event_details
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
@@ -90,8 +95,12 @@ def parse_event_details(text):
 
 def create_event(service, event_details):
     try:
+        logger.info(f"Received event details: {event_details}")
         start_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
         end_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
+        
+        logger.info(f"Start datetime: {start_datetime}")
+        logger.info(f"End datetime: {end_datetime}")
         
         # Ensure end_datetime is after start_datetime
         if end_datetime <= start_datetime:
@@ -155,14 +164,33 @@ def process_query(service, query):
                 return create_event(service, event_details)
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-        # ... rest of the function remains the same
+        elif "retrieve" in intent:
+            today = get_current_time().date()
+            tomorrow = today + timedelta(days=1)
+            events = get_events(service, today, tomorrow)
+            if events:
+                event_list = []
+                for event in events:
+                    start = event['start'].get('dateTime', event['start'].get('date'))
+                    if isinstance(start, str):
+                        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
+                        event_list.append(f"- {event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}")
+                    else:
+                        event_list.append(f"- {event['summary']} (all-day event on {start})")
+                return "Here are your events:\n" + "\n".join(event_list)
+            else:
+                return "You have no events scheduled."
+        else:
+            return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
+    except Exception as e:
+        logger.error(f"Error in process_query: {str(e)}")
+        return f"An error occurred while processing your request: {str(e)}"
 
 # Streamlit app
 st.title("Malaysia Timezone Calendar Assistant")
 
 # Display current time
 st.write(f"Current time in Malaysia: {get_current_time().strftime('%Y-%m-%d %I:%M %p')}")
-
 
 # Authentication flow
 if 'credentials' not in st.session_state:
@@ -227,3 +255,8 @@ if st.checkbox("Show debug info"):
     st.write("OpenAI API Key status:", "Set" if openai.api_key else "Not set")
     st.write("Google Client ID status:", "Set" if st.secrets.get("GOOGLE_CLIENT_ID") else "Not set")
     st.write("Google Client Secret status:", "Set" if st.secrets.get("GOOGLE_CLIENT_SECRET") else "Not set")
+
+# Add debug log display
+if st.checkbox("Show debug logs"):
+    with open("streamlit.log", "r") as log_file:
+        st.text(log_file.read())
