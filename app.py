@@ -52,12 +52,12 @@ def get_calendar_service():
         st.session_state.credentials = json.loads(credentials.to_json())
     return build('calendar', 'v3', credentials=credentials)
 
-def parse_event_details(text):
+def parse_event_details(text, context_date=None):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, time (HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8) and the event is for today unless explicitly stated otherwise."},
+                {"role": "system", "content": f"You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), time (HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8). If a date was mentioned in a previous query (context_date: {context_date}), use it unless a new date is explicitly stated."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
@@ -68,6 +68,8 @@ def parse_event_details(text):
         now = get_current_time()
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
+        if 'date' not in event_details or not event_details['date']:
+            event_details['date'] = context_date if context_date else now.strftime("%Y-%m-%d")
         if 'time' not in event_details or not event_details['time']:
             event_details['time'] = now.strftime("%H:%M")
         if 'duration_minutes' not in event_details or not event_details['duration_minutes']:
@@ -75,14 +77,8 @@ def parse_event_details(text):
         if 'description' not in event_details:
             event_details['description'] = ""
         
-        # Parse the time and set the date to today
-        today = now.date()
-        event_time = datetime.strptime(event_details['time'], "%H:%M").time()
-        event_datetime = malaysia_tz.localize(datetime.combine(today, event_time))
-        
-        # If the event time is earlier than now, assume it's for tomorrow
-        if event_datetime < now:
-            event_datetime += timedelta(days=1)
+        # Parse the date and time
+        event_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['time']}", "%Y-%m-%d %H:%M"))
         
         event_details['start_datetime'] = event_datetime
         event_details['end_datetime'] = event_datetime + timedelta(minutes=int(event_details['duration_minutes']))
@@ -172,8 +168,8 @@ def dispatch_query(query, context):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'agent' (create_event, retrieve_events, or general_query) and any relevant parameters."},
-                {"role": "user", "content": f"Previous context: {context}\nCurrent query: {query}"}
+                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'agent' (create_event, retrieve_events, or general_query), 'date' (if mentioned), and any other relevant parameters. If a date was mentioned in a previous query and is relevant to the current query, include it in your response."},
+                {"role": "user", "content": f"Previous context: {json.dumps(context)}\nCurrent query: {query}"}
             ]
         )
         result = json.loads(response.choices[0].message.content)
@@ -183,8 +179,9 @@ def dispatch_query(query, context):
         logger.error(f"Error in dispatch_query: {str(e)}")
         return {"agent": "general_query"}
 
-def create_event_agent(service, query):
-    event_details = parse_event_details(query)
+def create_event_agent(service, query, context):
+    date_str = context.get('last_mentioned_date')
+    event_details = parse_event_details(query, date_str)
     if event_details:
         return create_event(service, event_details)
     else:
@@ -225,19 +222,27 @@ def process_query(service, query):
         dispatch_result = dispatch_query(query, context)
 
         agent = dispatch_result.get('agent', 'general_query')
+        date_str = dispatch_result.get('date')
+
         if agent == 'create_event':
-            response = create_event_agent(service, query)
+            response = create_event_agent(service, query, context)
         elif agent == 'retrieve_events':
-            date_str = dispatch_result.get('date', 'today')
             response = retrieve_events_agent(service, date_str)
         else:
             response = general_query_agent(query)
 
-        st.session_state['context'] = {'last_query': query, 'last_response': response}
+        # Update context
+        if date_str:
+            context['last_mentioned_date'] = date_str
+        context['last_query'] = query
+        context['last_response'] = response
+        st.session_state['context'] = context
+
         return response
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
+
 
 if 'context' not in st.session_state:
     st.session_state['context'] = {}
