@@ -12,8 +12,7 @@ import pytz
 from dateutil import parser
 
 # Setup logging
-logging.basicConfig(filename='streamlit.log', level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Setup for Google Calendar API
@@ -52,40 +51,55 @@ def get_calendar_service():
         st.session_state.credentials = json.loads(credentials.to_json())
     return build('calendar', 'v3', credentials=credentials)
 
-def parse_event_details(text, context_date=None):
+def parse_date_time(date_str, time_str=None, context_date=None):
+    now = get_current_time()
+    if date_str.lower() == 'today':
+        date = now.date()
+    elif date_str.lower() == 'tomorrow':
+        date = (now + timedelta(days=1)).date()
+    else:
+        try:
+            date = parser.parse(date_str).date()
+        except:
+            date = context_date if context_date else now.date()
+
+    if time_str:
+        try:
+            time = parser.parse(time_str).time()
+        except:
+            time = now.time()
+    else:
+        time = now.time()
+
+    return malaysia_tz.localize(datetime.combine(date, time))
+
+def parse_event_details(text, context):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": f"You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), time (HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8). If a date was mentioned in a previous query (context_date: {context_date}), use it unless a new date is explicitly stated."},
-                {"role": "user", "content": f"Extract the event details from: {text}"}
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date, time, duration_minutes, and description. If any information is missing, use reasonable defaults. Pay close attention to the context."},
+                {"role": "user", "content": f"Context: {json.dumps(context)}\nExtract the event details from: {text}"}
             ]
         )
-        logger.info(f"OpenAI Response: {response.choices[0].message.content}")
         event_details = json.loads(response.choices[0].message.content)
         
-        # Set defaults if missing
+        # Set defaults and parse date/time
         now = get_current_time()
-        if 'title' not in event_details:
-            event_details['title'] = "Untitled Event"
-        if 'date' not in event_details or not event_details['date']:
-            event_details['date'] = context_date if context_date else now.strftime("%Y-%m-%d")
-        if 'time' not in event_details or not event_details['time']:
-            event_details['time'] = now.strftime("%H:%M")
-        if 'duration_minutes' not in event_details or not event_details['duration_minutes']:
-            event_details['duration_minutes'] = 60
-        if 'description' not in event_details:
-            event_details['description'] = ""
+        event_details['title'] = event_details.get('title', "Untitled Event")
+        event_details['duration_minutes'] = int(event_details.get('duration_minutes', 60))
+        event_details['description'] = event_details.get('description', "")
         
-        # Parse the date and time
-        event_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['time']}", "%Y-%m-%d %H:%M"))
+        start_datetime = parse_date_time(
+            event_details.get('date', context.get('last_mentioned_date', now.strftime('%Y-%m-%d'))),
+            event_details.get('time'),
+            context.get('last_mentioned_date')
+        )
         
-        event_details['start_datetime'] = event_datetime
-        event_details['end_datetime'] = event_datetime + timedelta(minutes=int(event_details['duration_minutes']))
+        event_details['start_datetime'] = start_datetime
+        event_details['end_datetime'] = start_datetime + timedelta(minutes=event_details['duration_minutes'])
         
         logger.info(f"Parsed event details: {event_details}")
-        logger.info(f"Event start time: {event_details['start_datetime']}")
-        logger.info(f"Event end time: {event_details['end_datetime']}")
         return event_details
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
@@ -95,7 +109,7 @@ def create_event(service, event_details):
     try:
         event = {
             'summary': event_details['title'],
-            'description': event_details.get('description', ''),
+            'description': event_details['description'],
             'start': {
                 'dateTime': event_details['start_datetime'].isoformat(),
                 'timeZone': 'Asia/Kuala_Lumpur',
@@ -105,33 +119,36 @@ def create_event(service, event_details):
                 'timeZone': 'Asia/Kuala_Lumpur',
             },
         }
-        logger.info(f"Creating event: {event}")
         created_event = service.events().insert(calendarId='primary', body=event).execute()
-        logger.info(f"Event created: {created_event.get('htmlLink')}")
-        return f"Event created: {created_event.get('htmlLink')}"
-    except HttpError as e:
-        logger.error(f"HttpError in create_event: {str(e)}")
-        error_details = json.loads(e.content.decode())
-        return f"An error occurred: {error_details}"
-    except Exception as e:
-        logger.error(f"Error in create_event: {str(e)}")
-        return f"An unexpected error occurred: {str(e)}"
-
-def get_events(service, start_date, end_date):
-    try:
-        start_datetime = malaysia_tz.localize(datetime.combine(start_date, datetime.min.time()))
-        end_datetime = malaysia_tz.localize(datetime.combine(end_date, datetime.max.time()))
         
-        events_result = service.events().list(calendarId='primary', 
-                                              timeMin=start_datetime.isoformat(),
-                                              timeMax=end_datetime.isoformat(), 
-                                              singleEvents=True,
-                                              orderBy='startTime').execute()
-        events = events_result.get('items', [])
-        return events
+        response = f"Event created successfully!\n"
+        response += f"Title: {event_details['title']}\n"
+        response += f"Date: {event_details['start_datetime'].strftime('%Y-%m-%d')}\n"
+        response += f"Time: {event_details['start_datetime'].strftime('%I:%M %p')} - {event_details['end_datetime'].strftime('%I:%M %p')}\n"
+        response += f"Duration: {event_details['duration_minutes']} minutes\n"
+        response += f"Description: {event_details['description']}\n"
+        response += f"Calendar link: {created_event.get('htmlLink')}"
+        
+        return response
+    except HttpError as e:
+        error_details = json.loads(e.content.decode())
+        return f"An error occurred while creating the event: {error_details}"
     except Exception as e:
-        logger.error(f"Error in get_events: {str(e)}")
-        return []
+        return f"An unexpected error occurred while creating the event: {str(e)}"
+
+def modify_event(service, event_id, updates):
+    try:
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        for key, value in updates.items():
+            if key in event:
+                event[key] = value
+        updated_event = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
+        return f"Event updated successfully. New details:\n{format_event(updated_event)}"
+    except HttpError as e:
+        error_details = json.loads(e.content.decode())
+        return f"An error occurred while modifying the event: {error_details}"
+    except Exception as e:
+        return f"An unexpected error occurred while modifying the event: {str(e)}"
 
 def get_events_for_date(service, date):
     try:
@@ -143,33 +160,31 @@ def get_events_for_date(service, date):
                                               timeMax=end_datetime.isoformat(), 
                                               singleEvents=True,
                                               orderBy='startTime').execute()
-        events = events_result.get('items', [])
-        return events
+        return events_result.get('items', [])
     except Exception as e:
         logger.error(f"Error in get_events_for_date: {str(e)}")
         return []
 
+def format_event(event):
+    start = event['start'].get('dateTime', event['start'].get('date'))
+    if isinstance(start, str):
+        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
+        return f"- {event['summary']} at {start_time.strftime('%I:%M %p')}"
+    else:
+        return f"- {event['summary']} (all-day event)"
+
 def format_events(events):
     if not events:
         return "You have no events scheduled."
-    
-    event_list = []
-    for event in events:
-        start = event['start'].get('dateTime', event['start'].get('date'))
-        if isinstance(start, str):
-            start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-            event_list.append(f"- {event['summary']} at {start_time.strftime('%I:%M %p')}")
-        else:
-            event_list.append(f"- {event['summary']} (all-day event)")
-    return "Here are your events:\n" + "\n".join(event_list)
+    return "Here are your events:\n" + "\n".join(format_event(event) for event in events)
 
 def dispatch_query(query, context):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'agent' (create_event, retrieve_events, or general_query), 'date' (if mentioned), and any other relevant parameters. If a date was mentioned in a previous query and is relevant to the current query, include it in your response."},
-                {"role": "user", "content": f"Previous context: {json.dumps(context)}\nCurrent query: {query}"}
+                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'intent' (create_event, modify_event, retrieve_events, or general_query), 'date' (if mentioned), and any other relevant parameters. Pay close attention to the context from previous queries."},
+                {"role": "user", "content": f"Context: {json.dumps(context)}\nCurrent query: {query}"}
             ]
         )
         result = json.loads(response.choices[0].message.content)
@@ -177,57 +192,30 @@ def dispatch_query(query, context):
         return result
     except Exception as e:
         logger.error(f"Error in dispatch_query: {str(e)}")
-        return {"agent": "general_query"}
-
-def create_event_agent(service, query, context):
-    date_str = context.get('last_mentioned_date')
-    event_details = parse_event_details(query, date_str)
-    if event_details:
-        return create_event(service, event_details)
-    else:
-        return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-
-def retrieve_events_agent(service, date_str):
-    now = get_current_time()
-    if date_str == 'today':
-        target_date = now.date()
-    elif date_str == 'tomorrow':
-        target_date = (now + timedelta(days=1)).date()
-    else:
-        try:
-            target_date = parser.parse(date_str).date()
-        except:
-            target_date = now.date()
-
-    events = get_events_for_date(service, target_date)
-    return f"Events for {target_date.strftime('%Y-%m-%d')}:\n" + format_events(events)
-
-def general_query_agent(query):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant. Provide a friendly and informative response to the user's query."},
-                {"role": "user", "content": query}
-            ]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Error in general_query_agent: {str(e)}")
-        return "I'm sorry, I encountered an error while processing your request."
+        return {"intent": "general_query"}
 
 def process_query(service, query):
     try:
         context = st.session_state.get('context', {})
+        context['conversation_history'] = st.session_state.get('messages', [])
         dispatch_result = dispatch_query(query, context)
 
-        agent = dispatch_result.get('agent', 'general_query')
+        intent = dispatch_result.get('intent', 'general_query')
         date_str = dispatch_result.get('date')
 
-        if agent == 'create_event':
-            response = create_event_agent(service, query, context)
-        elif agent == 'retrieve_events':
-            response = retrieve_events_agent(service, date_str)
+        if intent == 'create_event':
+            event_details = parse_event_details(query, context)
+            if event_details:
+                response = create_event(service, event_details)
+            else:
+                response = "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
+        elif intent == 'modify_event':
+            # This would require additional logic to identify which event to modify
+            response = "I'm sorry, event modification is not yet implemented."
+        elif intent == 'retrieve_events':
+            date = parse_date_time(date_str, context_date=context.get('last_mentioned_date')).date()
+            events = get_events_for_date(service, date)
+            response = f"Events for {date.strftime('%Y-%m-%d')}:\n" + format_events(events)
         else:
             response = general_query_agent(query)
 
@@ -243,12 +231,22 @@ def process_query(service, query):
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-
-if 'context' not in st.session_state:
-    st.session_state['context'] = {}
+def general_query_agent(query):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful calendar assistant. Provide a friendly and informative response to the user's query."},
+                {"role": "user", "content": query}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error in general_query_agent: {str(e)}")
+        return "I'm sorry, I encountered an error while processing your request."
 
 # Streamlit app
-st.title("Malaysia Timezone Calendar Assistant")
+st.title("Smart Calendar Assistant (Malaysia Timezone)")
 
 # Display current time
 st.write(f"Current time in Malaysia: {get_current_time().strftime('%Y-%m-%d %I:%M %p')}")
@@ -284,6 +282,8 @@ else:
     if service:
         if 'messages' not in st.session_state:
             st.session_state.messages = []
+        if 'context' not in st.session_state:
+            st.session_state.context = {}
 
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
@@ -319,11 +319,10 @@ if st.checkbox("Show debug info"):
 
 # Modify the debug log display section
 if st.checkbox("Show debug logs"):
-    log_contents = st.session_state.get('log_contents', [])
-    for log_entry in log_contents:
+    for log_entry in st.session_state.get('log_contents', []):
         st.text(log_entry)
 
-# Add this at the end of your main loop
+# Update log contents
 if 'log_contents' not in st.session_state:
     st.session_state.log_contents = []
 st.session_state.log_contents.append(f"Current time: {get_current_time()}")
