@@ -48,12 +48,26 @@ def parse_event_details(text):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description."},
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), and description. If any information is missing, use reasonable defaults."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
         logger.info(f"OpenAI Response: {response.choices[0].message.content}")
-        return json.loads(response.choices[0].message.content)
+        event_details = json.loads(response.choices[0].message.content)
+        
+        # Set defaults if missing
+        if 'title' not in event_details:
+            event_details['title'] = "Untitled Event"
+        if 'date' not in event_details:
+            event_details['date'] = datetime.now().strftime("%Y-%m-%d")
+        if 'start_time' not in event_details:
+            event_details['start_time'] = datetime.now().strftime("%H:%M")
+        if 'end_time' not in event_details:
+            event_details['end_time'] = (datetime.now() + timedelta(hours=1)).strftime("%H:%M")
+        if 'description' not in event_details:
+            event_details['description'] = ""
+        
+        return event_details
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
         return None
@@ -99,20 +113,20 @@ def process_query(service, query):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful calendar assistant. Determine if the user wants to create an event or retrieve events. Respond with 'create event' or 'retrieve events'."},
+                {"role": "system", "content": "You are a helpful calendar assistant. Determine if the user wants to create an event, retrieve events, or do something else. Respond with 'create', 'retrieve', or 'other'."},
                 {"role": "user", "content": query}
             ]
         )
         intent = response.choices[0].message.content.lower()
         logger.info(f"Detected intent: {intent}")
 
-        if "create event" in intent:
+        if "create" in intent:
             event_details = parse_event_details(query)
             if event_details:
                 return create_event(service, event_details)
             else:
                 return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
-        elif "retrieve events" in intent:
+        elif "retrieve" in intent:
             today = datetime.now().date()
             tomorrow = today + timedelta(days=1)
             events = get_events(service, today, tomorrow)
@@ -126,9 +140,10 @@ def process_query(service, query):
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
+# Streamlit app
 st.title("OpenAI-Powered Calendar Assistant")
 
-# Authentication flow (unchanged)
+# Authentication flow
 if 'credentials' not in st.session_state:
     flow = create_flow()
     authorization_url, _ = flow.authorization_url(prompt='consent')
