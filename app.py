@@ -1,10 +1,9 @@
 import streamlit as st
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-import pickle
-import os
+import json
 
 # Setup for Google Calendar API
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
@@ -14,52 +13,65 @@ CLIENT_CONFIG = {
         "client_secret": st.secrets["GOOGLE_CLIENT_SECRET"],
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [st.secrets["REDIRECT_URI"]],  # Use the deployed Streamlit app URL
     }
 }
 
-@st.cache_resource
 def get_calendar_service():
-    creds = None
-    if 'token' in st.session_state:
-        creds = Credentials.from_authorized_user_info(st.session_state['token'], SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
+    flow.redirect_uri = CLIENT_CONFIG['web']['redirect_uris'][0]
+
+    if 'token' not in st.session_state:
+        if 'code' not in st.experimental_get_query_params():
+            authorization_url, _ = flow.authorization_url(prompt='consent')
+            st.markdown(f'Please [click here]({authorization_url}) to authorize this app.')
+            return None
         else:
-            flow = Flow.from_client_config(CLIENT_CONFIG, SCOPES)
-            creds = flow.run_local_server(port=8080)
+            code = st.experimental_get_query_params()['code'][0]
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            st.session_state['token'] = creds.to_json()
+    else:
+        creds = Credentials.from_authorized_user_info(json.loads(st.session_state['token']), SCOPES)
+        
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
         st.session_state['token'] = creds.to_json()
+    
     return build('calendar', 'v3', credentials=creds)
 
 st.title("Create Google Calendar Event")
 
-# Collect event details
-event_title = st.text_input("Event Title")
-event_date = st.date_input("Event Date")
-start_time = st.time_input("Start Time")
-end_time = st.time_input("End Time")
-description = st.text_area("Event Description")
+service = get_calendar_service()
 
-if st.button("Create Event"):
-    try:
-        service = get_calendar_service()
-        
-        event = {
-            'summary': event_title,
-            'description': description,
-            'start': {
-                'dateTime': f"{event_date}T{start_time}:00",
-                'timeZone': 'UTC',  # Replace with your timezone
-            },
-            'end': {
-                'dateTime': f"{event_date}T{end_time}:00",
-                'timeZone': 'UTC',  # Replace with your timezone
-            },
-        }
+if service:
+    # Collect event details
+    event_title = st.text_input("Event Title")
+    event_date = st.date_input("Event Date")
+    start_time = st.time_input("Start Time")
+    end_time = st.time_input("End Time")
+    description = st.text_area("Event Description")
 
-        event = service.events().insert(calendarId='primary', body=event).execute()
-        st.success(f"Event created: {event.get('htmlLink')}")
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
+    if st.button("Create Event"):
+        try:
+            event = {
+                'summary': event_title,
+                'description': description,
+                'start': {
+                    'dateTime': f"{event_date}T{start_time}:00",
+                    'timeZone': 'UTC',  # Replace with your timezone
+                },
+                'end': {
+                    'dateTime': f"{event_date}T{end_time}:00",
+                    'timeZone': 'UTC',  # Replace with your timezone
+                },
+            }
+
+            event = service.events().insert(calendarId='primary', body=event).execute()
+            st.success(f"Event created: {event.get('htmlLink')}")
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+else:
+    st.warning('Please authenticate with Google Calendar using the link above.')
 
 st.write("Note: You may need to authenticate with Google on first use.")
