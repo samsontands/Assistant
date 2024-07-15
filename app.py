@@ -191,46 +191,15 @@ def format_event(event):
 
 def format_events(events):
     if not events:
-        return "No events scheduled."
-    event_list = []
-    locations = Counter()
-    for event in events:
-        start = event['start'].get('dateTime', event['start'].get('date'))
-        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-        event_str = f"{event['summary']} at {start_time.strftime('%I:%M %p')}"
-        if 'location' in event:
-            event_str += f" ({event['location']})"
-            locations[event['location']] += 1
-        event_list.append(event_str)
-    
-    response = "Events:\n" + "\n".join(event_list)
-    if locations:
-        response += "\n\nLocations summary:\n" + "\n".join(f"{loc}: {count}" for loc, count in locations.most_common())
-    return response
-
-def get_event_details(service, event_summary):
-    try:
-        now = get_current_time()
-        events_result = service.events().list(calendarId='primary', 
-                                              timeMin=now.isoformat(),
-                                              maxResults=10,
-                                              singleEvents=True,
-                                              orderBy='startTime').execute()
-        events = events_result.get('items', [])
-        for event in events:
-            if event['summary'].lower() == event_summary.lower():
-                return event
-        return None
-    except Exception as e:
-        logger.error(f"Error in get_event_details: {str(e)}")
-        return None
+        return "You have no events scheduled."
+    return "Here are your events:\n" + "\n".join(format_event(event) for event in events)
 
 def dispatch_query(query, context):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an intelligent calendar assistant that determines the user's intent based on their input. Respond with a JSON object containing 'intent' (create_event, retrieve_events, get_event_details, or general_query), 'date' (if mentioned), and any other relevant parameters. Pay close attention to the context from previous queries."},
+                {"role": "system", "content": "You are an intelligent assistant that determines which function to call based on user input. Respond with a JSON object containing 'intent' (create_event, modify_event, retrieve_events, or general_query), 'date' (if mentioned), and any other relevant parameters. Pay close attention to the context from previous queries."},
                 {"role": "user", "content": f"Context: {json.dumps(context)}\nCurrent query: {query}"}
             ]
         )
@@ -240,11 +209,11 @@ def dispatch_query(query, context):
     except Exception as e:
         logger.error(f"Error in dispatch_query: {str(e)}")
         return {"intent": "general_query"}
-        
+
 def create_event_agent(service, query, context):
     event_details = parse_event_details(query, context)
     if not event_details:
-        return "Please provide event details."
+        return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
 
     if not event_details['title']:
         return prompt_for_title()
@@ -257,27 +226,12 @@ def create_event_agent(service, query, context):
 
     clashing_events = check_for_clash(service, event_details['start_datetime'], event_details['end_datetime'])
     if clashing_events:
-        clash_info = "\n".join([f"{event['summary']} ({event['start']['dateTime']})" for event in clashing_events])
+        clash_info = "\n".join([f"- {event['summary']} ({event['start']['dateTime']})" for event in clashing_events])
         st.session_state.pending_event = event_details
         st.session_state.waiting_for_clash_confirmation = True
-        return f"Clashing events:\n{clash_info}\nCreate anyway? (Yes/No)"
+        return f"There are clashing events during this time:\n{clash_info}\nDo you still want to create this event? (Yes/No)"
 
     return create_event(service, event_details)
-
-def format_event_details(event):
-    start = event['start'].get('dateTime', event['start'].get('date'))
-    end = event['end'].get('dateTime', event['end'].get('date'))
-    start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-    end_time = datetime.fromisoformat(end).astimezone(malaysia_tz)
-    
-    details = f"Event: {event['summary']}\n"
-    details += f"Date: {start_time.strftime('%Y-%m-%d')}\n"
-    details += f"Time: {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}\n"
-    if 'location' in event:
-        details += f"Location: {event['location']}\n"
-    if 'description' in event:
-        details += f"Description: {event['description']}\n"
-    return details
 
 def process_query(service, query):
     try:
@@ -300,9 +254,9 @@ def process_query(service, query):
             elif query.lower() in ['no', 'n']:
                 st.session_state.waiting_for_clash_confirmation = False
                 del st.session_state.pending_event
-                return "Event creation cancelled."
+                return "Event creation cancelled due to clash."
             else:
-                return "Please respond with Yes or No."
+                return "Please respond with 'Yes' or 'No'."
 
         dispatch_result = dispatch_query(query, context)
 
@@ -311,43 +265,19 @@ def process_query(service, query):
 
         if intent == 'create_event':
             return create_event_agent(service, query, context)
+        elif intent == 'modify_event':
+            # This would require additional logic to identify which event to modify
+            return "I'm sorry, event modification is not yet implemented."
         elif intent == 'retrieve_events':
             date = parse_date_time(date_str, context_date=context.get('last_mentioned_date')).date()
             events = get_events_for_date(service, date)
             return f"Events for {date.strftime('%Y-%m-%d')}:\n" + format_events(events)
-        elif intent == 'get_event_details':
-            event_summary = dispatch_result.get('event_summary')
-            if event_summary:
-                event = get_event_details(service, event_summary)
-                if event:
-                    return format_event_details(event)
-                else:
-                    return f"No event found with title '{event_summary}'."
-            else:
-                return "Which event are you asking about?"
         else:
             return general_query_agent(query)
 
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
-        return f"Error processing request: {str(e)}"
-
-
-def get_events_for_period(service, start_date, end_date):
-    try:
-        start_datetime = malaysia_tz.localize(datetime.combine(start_date, datetime.min.time()))
-        end_datetime = malaysia_tz.localize(datetime.combine(end_date, datetime.max.time()))
-        
-        events_result = service.events().list(calendarId='primary', 
-                                              timeMin=start_datetime.isoformat(),
-                                              timeMax=end_datetime.isoformat(), 
-                                              singleEvents=True,
-                                              orderBy='startTime').execute()
-        return events_result.get('items', [])
-    except Exception as e:
-        logger.error(f"Error in get_events_for_period: {str(e)}")
-        return []
-
+        return f"An error occurred while processing your request: {str(e)}"
 def general_query_agent(query):
     try:
         response = openai.ChatCompletion.create(
