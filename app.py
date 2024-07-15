@@ -57,7 +57,7 @@ def parse_event_details(text):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, date_time (YYYY-MM-DD HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8)."},
+                {"role": "system", "content": "You are a helpful assistant that extracts event details from user input. Respond with a JSON object containing title, time (HH:MM), duration_minutes, and description. If any information is missing, use reasonable defaults. Assume the user is in Malaysia (GMT+8) and the event is for today unless explicitly stated otherwise."},
                 {"role": "user", "content": f"Extract the event details from: {text}"}
             ]
         )
@@ -68,19 +68,28 @@ def parse_event_details(text):
         now = get_current_time()
         if 'title' not in event_details:
             event_details['title'] = "Untitled Event"
-        if 'date_time' not in event_details or not event_details['date_time']:
-            event_details['date_time'] = now.strftime("%Y-%m-%d %H:%M")
+        if 'time' not in event_details or not event_details['time']:
+            event_details['time'] = now.strftime("%H:%M")
         if 'duration_minutes' not in event_details or not event_details['duration_minutes']:
             event_details['duration_minutes'] = 60
         if 'description' not in event_details:
             event_details['description'] = ""
         
-        # Parse the date_time
-        event_datetime = malaysia_tz.localize(datetime.strptime(event_details['date_time'], "%Y-%m-%d %H:%M"))
+        # Parse the time and set the date to today
+        today = now.date()
+        event_time = datetime.strptime(event_details['time'], "%H:%M").time()
+        event_datetime = malaysia_tz.localize(datetime.combine(today, event_time))
+        
+        # If the event time is earlier than now, assume it's for tomorrow
+        if event_datetime < now:
+            event_datetime += timedelta(days=1)
+        
         event_details['start_datetime'] = event_datetime
         event_details['end_datetime'] = event_datetime + timedelta(minutes=int(event_details['duration_minutes']))
         
         logger.info(f"Parsed event details: {event_details}")
+        logger.info(f"Event start time: {event_details['start_datetime']}")
+        logger.info(f"Event end time: {event_details['end_datetime']}")
         return event_details
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
@@ -102,6 +111,7 @@ def create_event(service, event_details):
         }
         logger.info(f"Creating event: {event}")
         created_event = service.events().insert(calendarId='primary', body=event).execute()
+        logger.info(f"Event created: {created_event.get('htmlLink')}")
         return f"Event created: {created_event.get('htmlLink')}"
     except HttpError as e:
         logger.error(f"HttpError in create_event: {str(e)}")
@@ -238,12 +248,13 @@ if st.checkbox("Show debug info"):
     st.write("Google Client ID status:", "Set" if st.secrets.get("GOOGLE_CLIENT_ID") else "Not set")
     st.write("Google Client Secret status:", "Set" if st.secrets.get("GOOGLE_CLIENT_SECRET") else "Not set")
 
-# Add debug log display
+# Modify the debug log display section
 if st.checkbox("Show debug logs"):
-    try:
-        with open("streamlit.log", "r") as log_file:
-            st.text(log_file.read())
-    except FileNotFoundError:
-        st.warning("Log file not found. This may be due to running on Streamlit Cloud, which doesn't allow direct file access.")
-    except Exception as e:
-        st.error(f"An error occurred while trying to read the log file: {str(e)}")
+    log_contents = st.session_state.get('log_contents', [])
+    for log_entry in log_contents:
+        st.text(log_entry)
+
+# Add this at the end of your main loop
+if 'log_contents' not in st.session_state:
+    st.session_state.log_contents = []
+st.session_state.log_contents.append(f"Current time: {get_current_time()}")
