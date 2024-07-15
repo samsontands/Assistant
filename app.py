@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import openai
 import logging
 import pytz
+from dateutil import parser
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +72,10 @@ def parse_event_details(text):
             event_details['end_time'] = (now + timedelta(hours=1)).strftime("%H:%M")
         if 'description' not in event_details:
             event_details['description'] = ""
+        
+        # Parse the date
+        parsed_date = parser.parse(event_details['date'], dayfirst=False, yearfirst=True)
+        event_details['date'] = parsed_date.strftime("%Y-%m-%d")
         
         return event_details
     except Exception as e:
@@ -149,17 +154,20 @@ def process_query(service, query):
                     start = event['start'].get('dateTime', event['start'].get('date'))
                     if isinstance(start, str):
                         start_time = datetime.fromisoformat(start).astimezone(MY_TZ)
-                        event_list.append(f"- {event['summary']} at {start_time.strftime('%I:%M %p')}")
+                        event_list.append(f"- {event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}")
                     else:
-                        event_list.append(f"- {event['summary']} (all-day event)")
-                return "Here are your events for today:\n" + "\n".join(event_list)
+                        event_list.append(f"- {event['summary']} (all-day event on {start})")
+                return "Here are your events:\n" + "\n".join(event_list)
             else:
-                return "You have no events scheduled for today."
+                return "You have no events scheduled."
         else:
             return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
+
+# Streamlit app code remains the same
+# ...
 
 # Streamlit app
 st.title("Malaysia Timezone Calendar Assistant")
