@@ -5,10 +5,11 @@ from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
+import re
 
-# Setup for Google Calendar API
-SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+# Setup for Google Calendar API (unchanged)
+SCOPES = ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.readonly']
 REDIRECT_URI = 'https://samsonassistant.streamlit.app/'
 
 CLIENT_CONFIG = {
@@ -22,26 +23,89 @@ CLIENT_CONFIG = {
 }
 
 def create_flow():
-    flow = Flow.from_client_config(
-        CLIENT_CONFIG,
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     return flow
 
 def get_calendar_service():
     if 'credentials' not in st.session_state:
         return None
-
     credentials = Credentials.from_authorized_user_info(st.session_state.credentials, SCOPES)
-    
     if credentials and credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
         st.session_state.credentials = json.loads(credentials.to_json())
-
     return build('calendar', 'v3', credentials=credentials)
 
-st.title("Create Google Calendar Event")
+def parse_date_time(text):
+    # This is a simple date/time parser. You might want to use a more robust solution like dateparser in a real app.
+    now = datetime.now()
+    if "today" in text.lower():
+        return now.date()
+    elif "tomorrow" in text.lower():
+        return (now + timedelta(days=1)).date()
+    elif "next week" in text.lower():
+        return (now + timedelta(weeks=1)).date()
+    else:
+        # Try to parse a date in the format YYYY-MM-DD
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+def create_event(service, title, start_date, start_time, end_time, description=""):
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(start_date, end_time)
+    
+    event = {
+        'summary': title,
+        'description': description,
+        'start': {
+            'dateTime': start_datetime.isoformat(),
+            'timeZone': 'UTC',
+        },
+        'end': {
+            'dateTime': end_datetime.isoformat(),
+            'timeZone': 'UTC',
+        },
+    }
+
+    try:
+        event = service.events().insert(calendarId='primary', body=event).execute()
+        return f"Event created: {event.get('htmlLink')}"
+    except HttpError as e:
+        error_details = json.loads(e.content.decode())
+        return f"An error occurred: {error_details}"
+
+def get_events(service, start_date, end_date):
+    events_result = service.events().list(calendarId='primary', timeMin=start_date.isoformat() + 'Z',
+                                          timeMax=end_date.isoformat() + 'Z', singleEvents=True,
+                                          orderBy='startTime').execute()
+    events = events_result.get('items', [])
+    return events
+
+def process_query(service, query):
+    query = query.lower()
+    
+    if "create" in query or "add" in query or "schedule" in query:
+        return "Sure, I can help you create an event. What's the title of the event?"
+    
+    elif "what" in query and "events" in query:
+        match = re.search(r'what events (do I have |are there )?(today|tomorrow|next week|on \d{4}-\d{2}-\d{2})', query)
+        if match:
+            date_str = match.group(2)
+            start_date = parse_date_time(date_str)
+            if start_date:
+                end_date = start_date + timedelta(days=1)
+                events = get_events(service, start_date, end_date)
+                if events:
+                    return "Here are your events:\n" + "\n".join([f"- {event['summary']} at {event['start']['dateTime']}" for event in events])
+                else:
+                    return f"You have no events scheduled for {date_str}."
+            else:
+                return "I'm sorry, I couldn't understand the date you specified."
+    
+    return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
+
+st.title("NLP Calendar Assistant")
 
 # Authentication flow (unchanged)
 if 'credentials' not in st.session_state:
@@ -71,43 +135,22 @@ if 'credentials' not in st.session_state:
 else:
     service = get_calendar_service()
     if service:
-        # Collect event details
-        event_title = st.text_input("Event Title")
-        event_date = st.date_input("Event Date")
-        start_time = st.time_input("Start Time")
-        end_time = st.time_input("End Time")
-        description = st.text_area("Event Description")
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
 
-        if st.button("Create Event"):
-            try:
-                # Combine date and time, and format correctly
-                start_datetime = datetime.combine(event_date, start_time).replace(tzinfo=timezone.utc)
-                end_datetime = datetime.combine(event_date, end_time).replace(tzinfo=timezone.utc)
-                
-                event = {
-                    'summary': event_title,
-                    'description': description,
-                    'start': {
-                        'dateTime': start_datetime.isoformat(),
-                        'timeZone': 'UTC',
-                    },
-                    'end': {
-                        'dateTime': end_datetime.isoformat(),
-                        'timeZone': 'UTC',
-                    },
-                }
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-                st.write("Sending the following event data to Google Calendar API:")
-                st.json(event)  # Display the event data for debugging
+        if prompt := st.chat_input("What would you like to do?"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-                event = service.events().insert(calendarId='primary', body=event).execute()
-                st.success(f"Event created: {event.get('htmlLink')}")
-            except HttpError as e:
-                error_details = json.loads(e.content.decode())
-                st.error(f"An HTTP error occurred: {e.resp.status} {e.resp.reason}")
-                st.error(f"Error details: {error_details}")
-            except Exception as e:
-                st.error(f"An unexpected error occurred: {str(e)}")
+            response = process_query(service, prompt)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            with st.chat_message("assistant"):
+                st.markdown(response)
 
         if st.button("Log out"):
             del st.session_state.credentials
