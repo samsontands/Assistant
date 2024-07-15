@@ -6,9 +6,9 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 import json
 from datetime import datetime, timedelta
-import re
+import openai
 
-# Setup for Google Calendar API (unchanged)
+# Setup for Google Calendar API
 SCOPES = ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.readonly']
 REDIRECT_URI = 'https://samsonassistant.streamlit.app/'
 
@@ -21,6 +21,9 @@ CLIENT_CONFIG = {
         "redirect_uris": [REDIRECT_URI],
     }
 }
+
+# Setup OpenAI
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def create_flow():
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
@@ -35,35 +38,26 @@ def get_calendar_service():
         st.session_state.credentials = json.loads(credentials.to_json())
     return build('calendar', 'v3', credentials=credentials)
 
-def parse_date_time(text):
-    # This is a simple date/time parser. You might want to use a more robust solution like dateparser in a real app.
-    now = datetime.now()
-    if "today" in text.lower():
-        return now.date()
-    elif "tomorrow" in text.lower():
-        return (now + timedelta(days=1)).date()
-    elif "next week" in text.lower():
-        return (now + timedelta(weeks=1)).date()
-    else:
-        # Try to parse a date in the format YYYY-MM-DD
-        try:
-            return datetime.strptime(text, "%Y-%m-%d").date()
-        except ValueError:
-            return None
+def parse_event_details(text):
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that extracts event details from user input."},
+            {"role": "user", "content": f"Extract the event title, date, start time, end time, and description from the following text: {text}"}
+        ]
+    )
+    return json.loads(response.choices[0].message.content)
 
-def create_event(service, title, start_date, start_time, end_time, description=""):
-    start_datetime = datetime.combine(start_date, start_time)
-    end_datetime = datetime.combine(start_date, end_time)
-    
+def create_event(service, event_details):
     event = {
-        'summary': title,
-        'description': description,
+        'summary': event_details['title'],
+        'description': event_details.get('description', ''),
         'start': {
-            'dateTime': start_datetime.isoformat(),
+            'dateTime': f"{event_details['date']}T{event_details['start_time']}:00",
             'timeZone': 'UTC',
         },
         'end': {
-            'dateTime': end_datetime.isoformat(),
+            'dateTime': f"{event_details['date']}T{event_details['end_time']}:00",
             'timeZone': 'UTC',
         },
     }
@@ -83,29 +77,32 @@ def get_events(service, start_date, end_date):
     return events
 
 def process_query(service, query):
-    query = query.lower()
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful calendar assistant. Determine the user's intent and respond accordingly."},
+            {"role": "user", "content": query}
+        ]
+    )
     
-    if "create" in query or "add" in query or "schedule" in query:
-        return "Sure, I can help you create an event. What's the title of the event?"
-    
-    elif "what" in query and "events" in query:
-        match = re.search(r'what events (do I have |are there )?(today|tomorrow|next week|on \d{4}-\d{2}-\d{2})', query)
-        if match:
-            date_str = match.group(2)
-            start_date = parse_date_time(date_str)
-            if start_date:
-                end_date = start_date + timedelta(days=1)
-                events = get_events(service, start_date, end_date)
-                if events:
-                    return "Here are your events:\n" + "\n".join([f"- {event['summary']} at {event['start']['dateTime']}" for event in events])
-                else:
-                    return f"You have no events scheduled for {date_str}."
-            else:
-                return "I'm sorry, I couldn't understand the date you specified."
-    
-    return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
+    intent = response.choices[0].message.content
 
-st.title("NLP Calendar Assistant")
+    if "create event" in intent.lower():
+        event_details = parse_event_details(query)
+        return create_event(service, event_details)
+    elif "retrieve events" in intent.lower():
+        # For simplicity, we're just retrieving today's events
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        events = get_events(service, today, tomorrow)
+        if events:
+            return "Here are your events for today:\n" + "\n".join([f"- {event['summary']} at {event['start'].get('dateTime', event['start'].get('date'))}" for event in events])
+        else:
+            return "You have no events scheduled for today."
+    else:
+        return "I'm sorry, I didn't understand that. You can ask me to create an event or ask about your scheduled events."
+
+st.title("OpenAI-Powered Calendar Assistant")
 
 # Authentication flow (unchanged)
 if 'credentials' not in st.session_state:
