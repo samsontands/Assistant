@@ -209,17 +209,27 @@ def format_events(events):
         response += "\n\nLocations summary:\n" + "\n".join(f"{loc}: {count}" for loc, count in locations.most_common())
     return response
 
-def get_event_details(service, event_summary):
+def get_event_details(service, event_summary, date=None):
     try:
-        now = get_current_time()
-        events_result = service.events().list(calendarId='primary', 
-                                              timeMin=now.isoformat(),
-                                              maxResults=10,
-                                              singleEvents=True,
-                                              orderBy='startTime').execute()
+        if date:
+            start_datetime = malaysia_tz.localize(datetime.combine(date, datetime.min.time()))
+            end_datetime = malaysia_tz.localize(datetime.combine(date, datetime.max.time()))
+        else:
+            now = get_current_time()
+            start_datetime = now
+            end_datetime = now + timedelta(days=30)  # Look for events in the next 30 days
+
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=start_datetime.isoformat(),
+            timeMax=end_datetime.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+
         events = events_result.get('items', [])
         for event in events:
-            if event['summary'].lower() == event_summary.lower():
+            if event_summary.lower() in event['summary'].lower():
                 return event
         return None
     except Exception as e:
@@ -267,17 +277,13 @@ def create_event_agent(service, query, context):
 
 def format_event_details(event):
     start = event['start'].get('dateTime', event['start'].get('date'))
-    end = event['end'].get('dateTime', event['end'].get('date'))
     start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
-    end_time = datetime.fromisoformat(end).astimezone(malaysia_tz)
     
-    details = f"Event: {event['summary']}\n"
-    details += f"Date: {start_time.strftime('%Y-%m-%d')}\n"
-    details += f"Time: {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}\n"
+    details = f"{event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}"
     if 'location' in event:
-        details += f"Location: {event['location']}\n"
+        details += f"\nLocation: {event['location']}"
     if 'description' in event:
-        details += f"Description: {event['description']}\n"
+        details += f"\nDescription: {event['description']}"
     return details
 
 def process_query(service, query):
@@ -315,15 +321,22 @@ def process_query(service, query):
         elif intent == 'retrieve_events':
             date = parse_date_time(date_str, context_date=context.get('last_mentioned_date')).date()
             events = get_events_for_date(service, date)
+            context['last_retrieved_date'] = date.isoformat()
+            context['last_retrieved_events'] = events
             return f"Events for {date.strftime('%Y-%m-%d')}:\n" + format_events(events)
         elif intent == 'get_event_details':
             event_summary = dispatch_result.get('event_summary')
+            if not event_summary and context.get('last_retrieved_events'):
+                # Try to extract event summary from the query
+                event_summary = query.lower()
+            
             if event_summary:
-                event = get_event_details(service, event_summary)
+                date = parse_date_time(date_str, context_date=context.get('last_retrieved_date')).date() if date_str else None
+                event = get_event_details(service, event_summary, date)
                 if event:
                     return format_event_details(event)
                 else:
-                    return f"No event found with title '{event_summary}'."
+                    return f"No event found matching '{event_summary}'."
             else:
                 return "Which event are you asking about?"
         else:
