@@ -32,11 +32,11 @@ CLIENT_CONFIG = {
 # Setup OpenAI
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Setup timezone
-MY_TZ = pytz.timezone('Asia/Kuala_Lumpur')
+# Set the time zone to GMT+8 (Malaysia)
+malaysia_tz = pytz.timezone('Asia/Kuala_Lumpur')
 
 def get_current_time():
-    return datetime.now(MY_TZ)
+    return datetime.now(malaysia_tz)
 
 def create_flow():
     flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=REDIRECT_URI)
@@ -87,8 +87,8 @@ def parse_event_details(text):
 
 def create_event(service, event_details):
     try:
-        start_datetime = MY_TZ.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
-        end_datetime = MY_TZ.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
+        start_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['start_time']}", "%Y-%m-%d %H:%M"))
+        end_datetime = malaysia_tz.localize(datetime.strptime(f"{event_details['date']} {event_details['end_time']}", "%Y-%m-%d %H:%M"))
         
         event = {
             'summary': event_details['title'],
@@ -115,8 +115,8 @@ def create_event(service, event_details):
 
 def get_events(service, start_date, end_date):
     try:
-        start_datetime = MY_TZ.localize(datetime.combine(start_date, datetime.min.time()))
-        end_datetime = MY_TZ.localize(datetime.combine(end_date, datetime.max.time()))
+        start_datetime = malaysia_tz.localize(datetime.combine(start_date, datetime.min.time()))
+        end_datetime = malaysia_tz.localize(datetime.combine(end_date, datetime.max.time()))
         
         events_result = service.events().list(calendarId='primary', 
                                               timeMin=start_datetime.isoformat(),
@@ -156,7 +156,7 @@ def process_query(service, query):
                 for event in events:
                     start = event['start'].get('dateTime', event['start'].get('date'))
                     if isinstance(start, str):
-                        start_time = datetime.fromisoformat(start).astimezone(MY_TZ)
+                        start_time = datetime.fromisoformat(start).astimezone(malaysia_tz)
                         event_list.append(f"- {event['summary']} on {start_time.strftime('%Y-%m-%d')} at {start_time.strftime('%I:%M %p')}")
                     else:
                         event_list.append(f"- {event['summary']} (all-day event on {start})")
@@ -174,6 +174,7 @@ st.title("Malaysia Timezone Calendar Assistant")
 
 # Display current time
 st.write(f"Current time in Malaysia: {get_current_time().strftime('%Y-%m-%d %I:%M %p')}")
+
 
 # Authentication flow
 if 'credentials' not in st.session_state:
