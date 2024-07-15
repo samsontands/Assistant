@@ -86,7 +86,7 @@ def parse_event_details(text, context):
         
         # Set defaults and parse date/time
         now = get_current_time()
-        event_details['title'] = event_details.get('title', "Untitled Event")
+        event_details['title'] = event_details.get('title', "")
         event_details['duration_minutes'] = int(event_details.get('duration_minutes', 60))
         event_details['description'] = event_details.get('description', "")
         
@@ -104,6 +104,22 @@ def parse_event_details(text, context):
     except Exception as e:
         logger.error(f"Error in parse_event_details: {str(e)}")
         return None
+        
+def prompt_for_title():
+    st.session_state.waiting_for_title = True
+    st.session_state.temp_event_details = st.session_state.get('temp_event_details', {})
+    return "What is this event about? Please provide a title for the event."
+
+def check_for_clash(service, start_time, end_time):
+    events_result = service.events().list(
+        calendarId='primary',
+        timeMin=start_time.isoformat(),
+        timeMax=end_time.isoformat(),
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
+    events = events_result.get('items', [])
+    return events
 
 def create_event(service, event_details):
     try:
@@ -194,43 +210,74 @@ def dispatch_query(query, context):
         logger.error(f"Error in dispatch_query: {str(e)}")
         return {"intent": "general_query"}
 
+def create_event_agent(service, query, context):
+    event_details = parse_event_details(query, context)
+    if not event_details:
+        return "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
+
+    if not event_details['title']:
+        return prompt_for_title()
+
+    if 'waiting_for_title' in st.session_state and st.session_state.waiting_for_title:
+        event_details = st.session_state.temp_event_details
+        event_details['title'] = query
+        st.session_state.waiting_for_title = False
+        del st.session_state.temp_event_details
+
+    clashing_events = check_for_clash(service, event_details['start_datetime'], event_details['end_datetime'])
+    if clashing_events:
+        clash_info = "\n".join([f"- {event['summary']} ({event['start']['dateTime']})" for event in clashing_events])
+        st.session_state.pending_event = event_details
+        st.session_state.waiting_for_clash_confirmation = True
+        return f"There are clashing events during this time:\n{clash_info}\nDo you still want to create this event? (Yes/No)"
+
+    return create_event(service, event_details)
+
 def process_query(service, query):
     try:
         context = st.session_state.get('context', {})
         context['conversation_history'] = st.session_state.get('messages', [])
+
+        if 'waiting_for_title' in st.session_state and st.session_state.waiting_for_title:
+            event_details = st.session_state.temp_event_details
+            event_details['title'] = query
+            st.session_state.waiting_for_title = False
+            del st.session_state.temp_event_details
+            return create_event_agent(service, json.dumps(event_details), context)
+
+        if 'waiting_for_clash_confirmation' in st.session_state and st.session_state.waiting_for_clash_confirmation:
+            if query.lower() in ['yes', 'y']:
+                st.session_state.waiting_for_clash_confirmation = False
+                event_details = st.session_state.pending_event
+                del st.session_state.pending_event
+                return create_event(service, event_details)
+            elif query.lower() in ['no', 'n']:
+                st.session_state.waiting_for_clash_confirmation = False
+                del st.session_state.pending_event
+                return "Event creation cancelled due to clash."
+            else:
+                return "Please respond with 'Yes' or 'No'."
+
         dispatch_result = dispatch_query(query, context)
 
         intent = dispatch_result.get('intent', 'general_query')
         date_str = dispatch_result.get('date')
 
         if intent == 'create_event':
-            event_details = parse_event_details(query, context)
-            if event_details:
-                response = create_event(service, event_details)
-            else:
-                response = "I'm sorry, I couldn't understand the event details. Could you please provide them in a clearer format?"
+            return create_event_agent(service, query, context)
         elif intent == 'modify_event':
             # This would require additional logic to identify which event to modify
-            response = "I'm sorry, event modification is not yet implemented."
+            return "I'm sorry, event modification is not yet implemented."
         elif intent == 'retrieve_events':
             date = parse_date_time(date_str, context_date=context.get('last_mentioned_date')).date()
             events = get_events_for_date(service, date)
-            response = f"Events for {date.strftime('%Y-%m-%d')}:\n" + format_events(events)
+            return f"Events for {date.strftime('%Y-%m-%d')}:\n" + format_events(events)
         else:
-            response = general_query_agent(query)
+            return general_query_agent(query)
 
-        # Update context
-        if date_str:
-            context['last_mentioned_date'] = date_str
-        context['last_query'] = query
-        context['last_response'] = response
-        st.session_state['context'] = context
-
-        return response
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
-
 def general_query_agent(query):
     try:
         response = openai.ChatCompletion.create(
@@ -298,6 +345,12 @@ else:
             st.session_state.messages.append({"role": "assistant", "content": response})
             with st.chat_message("assistant"):
                 st.markdown(response)
+
+            # Update context
+            context = st.session_state.get('context', {})
+            context['last_query'] = prompt
+            context['last_response'] = response
+            st.session_state['context'] = context
 
         if st.button("Log out"):
             del st.session_state.credentials
